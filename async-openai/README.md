@@ -34,9 +34,12 @@
   - [x] Images
   - [x] Models
   - [x] Moderations
-  - [x] Organizations | Administration
-  - [x] Realtime API types (Beta)
+  - [x] Organizations | Administration (partially implemented)
+  - [x] Realtime (Beta) (partially implemented)
+  - [x] Responses (partially implemented)
   - [x] Uploads
+  - [x] Videos
+- Bring your own custom types for Request or Response objects.
 - SSE streaming on available APIs
 - Requests (except SSE streaming) including form submissions are retried with exponential backoff when [rate limited](https://platform.openai.com/docs/guides/rate-limits).
 - Ergonomic builder pattern for all request objects.
@@ -62,7 +65,7 @@ $Env:OPENAI_API_KEY='sk-...'
 ## Realtime API
 
 Only types for Realtime API are implemented, and can be enabled with feature flag `realtime`.
-These types may change if/when OpenAI releases official specs for them.
+These types were written before OpenAI released official specs.
 
 ## Image Generation Example
 
@@ -108,11 +111,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
   <sub>Scaled up for README, actual size 256x256</sub>
 </div>
 
+## Bring Your Own Types
+
+Enable methods whose input and outputs are generics with `byot` feature. It creates a new method with same name and `_byot` suffix.
+
+For example, to use `serde_json::Value` as request and response type:
+```rust
+let response: Value = client
+        .chat()
+        .create_byot(json!({
+            "messages": [
+                {
+                    "role": "developer",
+                    "content": "You are a helpful assistant"
+                },
+                {
+                    "role": "user",
+                    "content": "What do you think about life?"
+                }
+            ],
+            "model": "gpt-4o",
+            "store": false
+        }))
+        .await?;
+```
+
+This can be useful in many scenarios:
+- To use this library with other OpenAI compatible APIs whose types don't exactly match OpenAI. 
+- Extend existing types in this crate with new fields with `serde`.
+- To avoid verbose types.
+- To escape deserialization errors.
+
+Visit [examples/bring-your-own-type](https://github.com/64bit/async-openai/tree/main/examples/bring-your-own-type)
+directory to learn more.
+
+## Dynamic Dispatch for Different Providers
+
+For any struct that implements `Config` trait, you can wrap it in a smart pointer and cast the pointer to `dyn Config`
+trait object, then your client can accept any wrapped configuration type.
+
+For example,
+
+```rust
+use async_openai::{Client, config::Config, config::OpenAIConfig};
+
+let openai_config = OpenAIConfig::default();
+// You can use `std::sync::Arc` to wrap the config as well
+let config = Box::new(openai_config) as Box<dyn Config>;
+let client: Client<Box<dyn Config> > = Client::with_config(config);
+```
+
 ## Contributing
 
 Thank you for taking the time to contribute and improve the project. I'd be happy to have you!
 
-All forms of contributions, such as new features requests, bug fixes, issues, documentation, testing, comments, [examples](../examples) etc. are welcome.
+All forms of contributions, such as new features requests, bug fixes, issues, documentation, testing, comments, [examples](https://github.com/64bit/async-openai/tree/main/examples) etc. are welcome.
 
 A good starting point would be to look at existing [open issues](https://github.com/64bit/async-openai/issues).
 

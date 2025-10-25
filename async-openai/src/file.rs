@@ -27,24 +27,32 @@ impl<'c, C: Config> Files<'c, C> {
     ///The Batch API only supports `.jsonl` files up to 100 MB in size. The input also has a specific required [format](https://platform.openai.com/docs/api-reference/batch/request-input).
     ///
     /// Please [contact us](https://help.openai.com/) if you need to increase these storage limits.
+    #[crate::byot(
+        T0 = Clone,
+        R = serde::de::DeserializeOwned,
+        where_clause =  "reqwest::multipart::Form: crate::traits::AsyncTryFrom<T0, Error = OpenAIError>",
+    )]
     pub async fn create(&self, request: CreateFileRequest) -> Result<OpenAIFile, OpenAIError> {
         self.client.post_form("/files", request).await
     }
 
     /// Returns a list of files that belong to the user's organization.
+    #[crate::byot(T0 = serde::Serialize, R = serde::de::DeserializeOwned)]
     pub async fn list<Q>(&self, query: &Q) -> Result<ListFilesResponse, OpenAIError>
     where
         Q: Serialize + ?Sized,
     {
-        self.client.get_with_query("/files", query).await
+        self.client.get_with_query("/files", &query).await
     }
 
     /// Returns information about a specific file.
+    #[crate::byot(T0 = std::fmt::Display, R = serde::de::DeserializeOwned)]
     pub async fn retrieve(&self, file_id: &str) -> Result<OpenAIFile, OpenAIError> {
         self.client.get(format!("/files/{file_id}").as_str()).await
     }
 
     /// Delete a file.
+    #[crate::byot(T0 = std::fmt::Display, R = serde::de::DeserializeOwned)]
     pub async fn delete(&self, file_id: &str) -> Result<DeleteFileResponse, OpenAIError> {
         self.client
             .delete(format!("/files/{file_id}").as_str())
@@ -62,7 +70,7 @@ impl<'c, C: Config> Files<'c, C> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        types::{CreateFileRequestArgs, FilePurpose},
+        types::{CreateFileRequestArgs, FileExpiresAfter, FileExpiresAfterAnchor, FilePurpose},
         Client,
     };
 
@@ -81,6 +89,10 @@ mod tests {
         let request = CreateFileRequestArgs::default()
             .file(test_file_path)
             .purpose(FilePurpose::FineTune)
+            .expires_after(FileExpiresAfter {
+                anchor: FileExpiresAfterAnchor::CreatedAt,
+                seconds: 3600,
+            })
             .build()
             .unwrap();
 
@@ -103,6 +115,7 @@ mod tests {
         assert_eq!(openai_file.bytes, retrieved_file.bytes);
         assert_eq!(openai_file.filename, retrieved_file.filename);
         assert_eq!(openai_file.purpose, retrieved_file.purpose);
+        assert_eq!(openai_file.expires_at, retrieved_file.expires_at);
 
         /*
         // "To help mitigate abuse, downloading of fine-tune training files is disabled for free accounts."

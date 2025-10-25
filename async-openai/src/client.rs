@@ -2,17 +2,19 @@ use std::pin::Pin;
 
 use bytes::Bytes;
 use futures::{stream::StreamExt, Stream};
-use reqwest_eventsource::{Event, EventSource, RequestBuilderExt};
+use reqwest::{multipart::Form, Response};
+use reqwest_eventsource::{Error as EventSourceError, Event, EventSource, RequestBuilderExt};
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
     config::{Config, OpenAIConfig},
-    error::{map_deserialization_error, OpenAIError, WrappedError},
+    error::{map_deserialization_error, ApiError, OpenAIError, StreamError, WrappedError},
     file::Files,
     image::Images,
     moderation::Moderations,
+    traits::AsyncTryFrom,
     Assistants, Audio, AuditLogs, Batches, Chat, Completions, Embeddings, FineTuning, Invites,
-    Models, Projects, Threads, Users, VectorStores,
+    Models, Projects, Responses, Threads, Uploads, Users, VectorStores, Videos,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -100,6 +102,11 @@ impl<C: Config> Client<C> {
         Files::new(self)
     }
 
+    /// To call [Uploads] group related APIs using this client.
+    pub fn uploads(&self) -> Uploads<C> {
+        Uploads::new(self)
+    }
+
     /// To call [FineTuning] group related APIs using this client.
     pub fn fine_tuning(&self) -> FineTuning<C> {
         FineTuning::new(self)
@@ -113,6 +120,11 @@ impl<C: Config> Client<C> {
     /// To call [Audio] group related APIs using this client.
     pub fn audio(&self) -> Audio<C> {
         Audio::new(self)
+    }
+
+    /// To call [Videos] group related APIs using this client.
+    pub fn videos(&self) -> Videos<C> {
+        Videos::new(self)
     }
 
     /// To call [Assistants] group related APIs using this client.
@@ -153,6 +165,11 @@ impl<C: Config> Client<C> {
     /// To call [Projects] group related APIs using this client.
     pub fn projects(&self) -> Projects<C> {
         Projects::new(self)
+    }
+
+    /// To call [Responses] group related APIs using this client.
+    pub fn responses(&self) -> Responses<C> {
+        Responses::new(self)
     }
 
     pub fn config(&self) -> &C {
@@ -226,6 +243,27 @@ impl<C: Config> Client<C> {
         self.execute_raw(request_maker).await
     }
 
+    pub(crate) async fn get_raw_with_query<Q>(
+        &self,
+        path: &str,
+        query: &Q,
+    ) -> Result<Bytes, OpenAIError>
+    where
+        Q: Serialize + ?Sized,
+    {
+        let request_maker = || async {
+            Ok(self
+                .http_client
+                .get(self.config.url(path))
+                .query(&self.config.query())
+                .query(query)
+                .headers(self.config.headers())
+                .build()?)
+        };
+
+        self.execute_raw(request_maker).await
+    }
+
     /// Make a POST request to {path} and return the response body
     pub(crate) async fn post_raw<I>(&self, path: &str, request: I) -> Result<Bytes, OpenAIError>
     where
@@ -266,7 +304,7 @@ impl<C: Config> Client<C> {
     /// POST a form at {path} and return the response body
     pub(crate) async fn post_form_raw<F>(&self, path: &str, form: F) -> Result<Bytes, OpenAIError>
     where
-        reqwest::multipart::Form: async_convert::TryFrom<F, Error = OpenAIError>,
+        Form: AsyncTryFrom<F, Error = OpenAIError>,
         F: Clone,
     {
         let request_maker = || async {
@@ -275,7 +313,7 @@ impl<C: Config> Client<C> {
                 .post(self.config.url(path))
                 .query(&self.config.query())
                 .headers(self.config.headers())
-                .multipart(async_convert::TryFrom::try_from(form.clone()).await?)
+                .multipart(<Form as AsyncTryFrom<F>>::try_from(form.clone()).await?)
                 .build()?)
         };
 
@@ -286,7 +324,7 @@ impl<C: Config> Client<C> {
     pub(crate) async fn post_form<O, F>(&self, path: &str, form: F) -> Result<O, OpenAIError>
     where
         O: DeserializeOwned,
-        reqwest::multipart::Form: async_convert::TryFrom<F, Error = OpenAIError>,
+        Form: AsyncTryFrom<F, Error = OpenAIError>,
         F: Clone,
     {
         let request_maker = || async {
@@ -295,7 +333,7 @@ impl<C: Config> Client<C> {
                 .post(self.config.url(path))
                 .query(&self.config.query())
                 .headers(self.config.headers())
-                .multipart(async_convert::TryFrom::try_from(form.clone()).await?)
+                .multipart(<Form as AsyncTryFrom<F>>::try_from(form.clone()).await?)
                 .build()?)
         };
 
@@ -323,37 +361,34 @@ impl<C: Config> Client<C> {
                 .map_err(backoff::Error::Permanent)?;
 
             let status = response.status();
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(OpenAIError::Reqwest)
-                .map_err(backoff::Error::Permanent)?;
 
-            // Deserialize response body from either error object or actual response object
-            if !status.is_success() {
-                let wrapped_error: WrappedError = serde_json::from_slice(bytes.as_ref())
-                    .map_err(|e| map_deserialization_error(e, bytes.as_ref()))
-                    .map_err(backoff::Error::Permanent)?;
-
-                if status.as_u16() == 429
-                    // API returns 429 also when:
-                    // "You exceeded your current quota, please check your plan and billing details."
-                    && wrapped_error.error.r#type != Some("insufficient_quota".to_string())
-                {
-                    // Rate limited retry...
-                    tracing::warn!("Rate limited: {}", wrapped_error.error.message);
-                    return Err(backoff::Error::Transient {
-                        err: OpenAIError::ApiError(wrapped_error.error),
-                        retry_after: None,
-                    });
-                } else {
-                    return Err(backoff::Error::Permanent(OpenAIError::ApiError(
-                        wrapped_error.error,
-                    )));
+            match read_response(response).await {
+                Ok(bytes) => Ok(bytes),
+                Err(e) => {
+                    match e {
+                        OpenAIError::ApiError(api_error) => {
+                            if status.is_server_error() {
+                                Err(backoff::Error::Transient {
+                                    err: OpenAIError::ApiError(api_error),
+                                    retry_after: None,
+                                })
+                            } else if status.as_u16() == 429
+                                && api_error.r#type != Some("insufficient_quota".to_string())
+                            {
+                                // Rate limited retry...
+                                tracing::warn!("Rate limited: {}", api_error.message);
+                                Err(backoff::Error::Transient {
+                                    err: OpenAIError::ApiError(api_error),
+                                    retry_after: None,
+                                })
+                            } else {
+                                Err(backoff::Error::Permanent(OpenAIError::ApiError(api_error)))
+                            }
+                        }
+                        _ => Err(backoff::Error::Permanent(e)),
+                    }
                 }
             }
-
-            Ok(bytes)
         })
         .await
     }
@@ -444,6 +479,44 @@ impl<C: Config> Client<C> {
     }
 }
 
+async fn read_response(response: Response) -> Result<Bytes, OpenAIError> {
+    let status = response.status();
+    let bytes = response.bytes().await.map_err(OpenAIError::Reqwest)?;
+
+    if status.is_server_error() {
+        // OpenAI does not guarantee server errors are returned as JSON so we cannot deserialize them.
+        let message: String = String::from_utf8_lossy(&bytes).into_owned();
+        tracing::warn!("Server error: {status} - {message}");
+        return Err(OpenAIError::ApiError(ApiError {
+            message,
+            r#type: None,
+            param: None,
+            code: None,
+        }));
+    }
+
+    // Deserialize response body from either error object or actual response object
+    if !status.is_success() {
+        let wrapped_error: WrappedError = serde_json::from_slice(bytes.as_ref())
+            .map_err(|e| map_deserialization_error(e, bytes.as_ref()))?;
+
+        return Err(OpenAIError::ApiError(wrapped_error.error));
+    }
+
+    Ok(bytes)
+}
+
+async fn map_stream_error(value: EventSourceError) -> OpenAIError {
+    match value {
+        EventSourceError::InvalidStatusCode(status_code, response) => {
+            read_response(response).await.expect_err(&format!(
+                "Unreachable because read_response returns err when status_code {status_code} is invalid"
+            ))
+        }
+        _ => OpenAIError::StreamError(StreamError::ReqwestEventSource(value)),
+    }
+}
+
 /// Request which responds with SSE.
 /// [server-sent events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format)
 pub(crate) async fn stream<O>(
@@ -458,7 +531,7 @@ where
         while let Some(ev) = event_source.next().await {
             match ev {
                 Err(e) => {
-                    if let Err(_e) = tx.send(Err(OpenAIError::StreamError(e.to_string()))) {
+                    if let Err(_e) = tx.send(Err(map_stream_error(e).await)) {
                         // rx dropped
                         break;
                     }
@@ -503,7 +576,7 @@ where
         while let Some(ev) = event_source.next().await {
             match ev {
                 Err(e) => {
-                    if let Err(_e) = tx.send(Err(OpenAIError::StreamError(e.to_string()))) {
+                    if let Err(_e) = tx.send(Err(map_stream_error(e).await)) {
                         // rx dropped
                         break;
                     }

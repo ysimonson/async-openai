@@ -6,26 +6,30 @@ use std::{
 use crate::{
     download::{download_url, save_b64},
     error::OpenAIError,
-    types::InputSource,
+    traits::AsyncTryFrom,
+    types::{InputSource, VideoSize},
     util::{create_all_dir, create_file_part},
 };
 
 use bytes::Bytes;
 
 use super::{
+    responses::{CodeInterpreterContainer, Input, InputContent, Role as ResponsesRole},
     AddUploadPartRequest, AudioInput, AudioResponseFormat, ChatCompletionFunctionCall,
     ChatCompletionFunctions, ChatCompletionNamedToolChoice, ChatCompletionRequestAssistantMessage,
-    ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestFunctionMessage,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
-    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionToolChoiceOption, CreateFileRequest, CreateImageEditRequest,
-    CreateImageVariationRequest, CreateMessageRequestContent, CreateSpeechResponse,
-    CreateTranscriptionRequest, CreateTranslationRequest, DallE2ImageSize, EmbeddingInput,
-    FileInput, FilePurpose, FunctionName, Image, ImageInput, ImageModel, ImageResponseFormat,
-    ImageSize, ImageUrl, ImagesResponse, ModerationInput, Prompt, Role, Stop, TimestampGranularity,
+    ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestDeveloperMessage,
+    ChatCompletionRequestDeveloperMessageContent, ChatCompletionRequestFunctionMessage,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartAudio,
+    ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
+    ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
+    ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
+    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, CreateFileRequest,
+    CreateImageEditRequest, CreateImageVariationRequest, CreateMessageRequestContent,
+    CreateSpeechResponse, CreateTranscriptionRequest, CreateTranslationRequest, CreateVideoRequest,
+    DallE2ImageSize, EmbeddingInput, FileExpiresAfterAnchor, FileInput, FilePurpose, FunctionName,
+    Image, ImageInput, ImageModel, ImageResponseFormat, ImageSize, ImageUrl, ImagesResponse,
+    ModerationInput, Prompt, Role, Stop, TimestampGranularity,
 };
 
 /// for `impl_from!(T, Enum)`, implements
@@ -157,6 +161,21 @@ impl_input!(AudioInput);
 impl_input!(FileInput);
 impl_input!(ImageInput);
 
+impl Display for VideoSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::S720x1280 => "720x1280",
+                Self::S1280x720 => "1280x720",
+                Self::S1024x1792 => "1024x1792",
+                Self::S1792x1024 => "1792x1024",
+            }
+        )
+    }
+}
+
 impl Display for ImageSize {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -274,6 +293,18 @@ impl Display for FilePurpose {
     }
 }
 
+impl Display for FileExpiresAfterAnchor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::CreatedAt => "created_at",
+            }
+        )
+    }
+}
+
 impl ImagesResponse {
     /// Save each image in a dedicated Tokio task and return paths to saved files.
     /// For [ResponseFormat::Url] each file is downloaded in dedicated Tokio task.
@@ -368,7 +399,7 @@ macro_rules! impl_from_for_integer_array {
 }
 
 impl_from_for_integer_array!(u32, EmbeddingInput);
-impl_from_for_integer_array!(u16, Prompt);
+impl_from_for_integer_array!(u32, Prompt);
 
 macro_rules! impl_from_for_array_of_integer_array {
     ($from_typ:ty, $to_typ:ty) => {
@@ -465,7 +496,7 @@ macro_rules! impl_from_for_array_of_integer_array {
 }
 
 impl_from_for_array_of_integer_array!(u32, EmbeddingInput);
-impl_from_for_array_of_integer_array!(u16, Prompt);
+impl_from_for_array_of_integer_array!(u32, Prompt);
 
 impl From<&str> for ChatCompletionFunctionCall {
     fn from(value: &str) -> Self {
@@ -551,6 +582,12 @@ impl From<ChatCompletionRequestSystemMessage> for ChatCompletionRequestMessage {
     }
 }
 
+impl From<ChatCompletionRequestDeveloperMessage> for ChatCompletionRequestMessage {
+    fn from(value: ChatCompletionRequestDeveloperMessage) -> Self {
+        Self::Developer(value)
+    }
+}
+
 impl From<ChatCompletionRequestAssistantMessage> for ChatCompletionRequestMessage {
     fn from(value: ChatCompletionRequestAssistantMessage) -> Self {
         Self::Assistant(value)
@@ -580,6 +617,15 @@ impl From<ChatCompletionRequestUserMessageContent> for ChatCompletionRequestUser
 
 impl From<ChatCompletionRequestSystemMessageContent> for ChatCompletionRequestSystemMessage {
     fn from(value: ChatCompletionRequestSystemMessageContent) -> Self {
+        Self {
+            content: value,
+            name: None,
+        }
+    }
+}
+
+impl From<ChatCompletionRequestDeveloperMessageContent> for ChatCompletionRequestDeveloperMessage {
+    fn from(value: ChatCompletionRequestDeveloperMessageContent) -> Self {
         Self {
             content: value,
             name: None,
@@ -617,6 +663,18 @@ impl From<&str> for ChatCompletionRequestSystemMessageContent {
 impl From<String> for ChatCompletionRequestSystemMessageContent {
     fn from(value: String) -> Self {
         ChatCompletionRequestSystemMessageContent::Text(value)
+    }
+}
+
+impl From<&str> for ChatCompletionRequestDeveloperMessageContent {
+    fn from(value: &str) -> Self {
+        ChatCompletionRequestDeveloperMessageContent::Text(value.into())
+    }
+}
+
+impl From<String> for ChatCompletionRequestDeveloperMessageContent {
+    fn from(value: String) -> Self {
+        ChatCompletionRequestDeveloperMessageContent::Text(value)
     }
 }
 
@@ -662,7 +720,19 @@ impl From<&str> for ChatCompletionRequestSystemMessage {
     }
 }
 
+impl From<&str> for ChatCompletionRequestDeveloperMessage {
+    fn from(value: &str) -> Self {
+        ChatCompletionRequestDeveloperMessageContent::Text(value.into()).into()
+    }
+}
+
 impl From<String> for ChatCompletionRequestSystemMessage {
+    fn from(value: String) -> Self {
+        value.as_str().into()
+    }
+}
+
+impl From<String> for ChatCompletionRequestDeveloperMessage {
     fn from(value: String) -> Self {
         value.as_str().into()
     }
@@ -701,6 +771,14 @@ impl From<ChatCompletionRequestMessageContentPartImage>
 {
     fn from(value: ChatCompletionRequestMessageContentPartImage) -> Self {
         ChatCompletionRequestUserMessageContentPart::ImageUrl(value)
+    }
+}
+
+impl From<ChatCompletionRequestMessageContentPartAudio>
+    for ChatCompletionRequestUserMessageContentPart
+{
+    fn from(value: ChatCompletionRequestMessageContentPartAudio) -> Self {
+        ChatCompletionRequestUserMessageContentPart::InputAudio(value)
     }
 }
 
@@ -758,6 +836,12 @@ impl Default for CreateMessageRequestContent {
     }
 }
 
+impl Default for ChatCompletionRequestDeveloperMessageContent {
+    fn default() -> Self {
+        ChatCompletionRequestDeveloperMessageContent::Text("".into())
+    }
+}
+
 impl Default for ChatCompletionRequestSystemMessageContent {
     fn default() -> Self {
         ChatCompletionRequestSystemMessageContent::Text("".into())
@@ -772,8 +856,7 @@ impl Default for ChatCompletionRequestToolMessageContent {
 
 // start: types to multipart from
 
-#[async_convert::async_trait]
-impl async_convert::TryFrom<CreateTranscriptionRequest> for reqwest::multipart::Form {
+impl AsyncTryFrom<CreateTranscriptionRequest> for reqwest::multipart::Form {
     type Error = OpenAIError;
 
     async fn try_from(request: CreateTranscriptionRequest) -> Result<Self, Self::Error> {
@@ -809,8 +892,7 @@ impl async_convert::TryFrom<CreateTranscriptionRequest> for reqwest::multipart::
     }
 }
 
-#[async_convert::async_trait]
-impl async_convert::TryFrom<CreateTranslationRequest> for reqwest::multipart::Form {
+impl AsyncTryFrom<CreateTranslationRequest> for reqwest::multipart::Form {
     type Error = OpenAIError;
 
     async fn try_from(request: CreateTranslationRequest) -> Result<Self, Self::Error> {
@@ -835,8 +917,7 @@ impl async_convert::TryFrom<CreateTranslationRequest> for reqwest::multipart::Fo
     }
 }
 
-#[async_convert::async_trait]
-impl async_convert::TryFrom<CreateImageEditRequest> for reqwest::multipart::Form {
+impl AsyncTryFrom<CreateImageEditRequest> for reqwest::multipart::Form {
     type Error = OpenAIError;
 
     async fn try_from(request: CreateImageEditRequest) -> Result<Self, Self::Error> {
@@ -877,8 +958,7 @@ impl async_convert::TryFrom<CreateImageEditRequest> for reqwest::multipart::Form
     }
 }
 
-#[async_convert::async_trait]
-impl async_convert::TryFrom<CreateImageVariationRequest> for reqwest::multipart::Form {
+impl AsyncTryFrom<CreateImageVariationRequest> for reqwest::multipart::Form {
     type Error = OpenAIError;
 
     async fn try_from(request: CreateImageVariationRequest) -> Result<Self, Self::Error> {
@@ -912,21 +992,25 @@ impl async_convert::TryFrom<CreateImageVariationRequest> for reqwest::multipart:
     }
 }
 
-#[async_convert::async_trait]
-impl async_convert::TryFrom<CreateFileRequest> for reqwest::multipart::Form {
+impl AsyncTryFrom<CreateFileRequest> for reqwest::multipart::Form {
     type Error = OpenAIError;
 
     async fn try_from(request: CreateFileRequest) -> Result<Self, Self::Error> {
         let file_part = create_file_part(request.file.source).await?;
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .part("file", file_part)
             .text("purpose", request.purpose.to_string());
+
+        if let Some(expires_after) = request.expires_after {
+            form = form
+                .text("expires_after[anchor]", expires_after.anchor.to_string())
+                .text("expires_after[seconds]", expires_after.seconds.to_string());
+        }
         Ok(form)
     }
 }
 
-#[async_convert::async_trait]
-impl async_convert::TryFrom<AddUploadPartRequest> for reqwest::multipart::Form {
+impl AsyncTryFrom<AddUploadPartRequest> for reqwest::multipart::Form {
     type Error = OpenAIError;
 
     async fn try_from(request: AddUploadPartRequest) -> Result<Self, Self::Error> {
@@ -936,4 +1020,77 @@ impl async_convert::TryFrom<AddUploadPartRequest> for reqwest::multipart::Form {
     }
 }
 
+impl AsyncTryFrom<CreateVideoRequest> for reqwest::multipart::Form {
+    type Error = OpenAIError;
+
+    async fn try_from(request: CreateVideoRequest) -> Result<Self, Self::Error> {
+        let mut form = reqwest::multipart::Form::new().text("model", request.model);
+
+        form = form.text("prompt", request.prompt);
+
+        if request.size.is_some() {
+            form = form.text("size", request.size.unwrap().to_string());
+        }
+
+        if request.seconds.is_some() {
+            form = form.text("seconds", request.seconds.unwrap());
+        }
+
+        if request.input_reference.is_some() {
+            let image_part = create_file_part(request.input_reference.unwrap().source).await?;
+            form = form.part("input_reference", image_part);
+        }
+
+        Ok(form)
+    }
+}
+
 // end: types to multipart form
+
+impl Default for Input {
+    fn default() -> Self {
+        Self::Text("".to_string())
+    }
+}
+
+impl Default for InputContent {
+    fn default() -> Self {
+        Self::TextInput("".to_string())
+    }
+}
+
+impl From<String> for Input {
+    fn from(value: String) -> Self {
+        Input::Text(value)
+    }
+}
+
+impl From<&str> for Input {
+    fn from(value: &str) -> Self {
+        Input::Text(value.to_owned())
+    }
+}
+
+impl Default for ResponsesRole {
+    fn default() -> Self {
+        Self::User
+    }
+}
+
+impl From<String> for InputContent {
+    fn from(value: String) -> Self {
+        Self::TextInput(value)
+    }
+}
+
+impl From<&str> for InputContent {
+    fn from(value: &str) -> Self {
+        Self::TextInput(value.to_owned())
+    }
+}
+
+impl Default for CodeInterpreterContainer {
+    fn default() -> Self {
+        CodeInterpreterContainer::Id("".to_string())
+    }
+}

@@ -5,7 +5,8 @@ use crate::{
     error::OpenAIError,
     types::{
         CreateVectorStoreRequest, DeleteVectorStoreResponse, ListVectorStoresResponse,
-        UpdateVectorStoreRequest, VectorStoreObject,
+        UpdateVectorStoreRequest, VectorStoreObject, VectorStoreSearchRequest,
+        VectorStoreSearchResultsPage,
     },
     vector_store_file_batches::VectorStoreFileBatches,
     Client, VectorStoreFiles,
@@ -31,6 +32,7 @@ impl<'c, C: Config> VectorStores<'c, C> {
     }
 
     /// Create a vector store.
+    #[crate::byot(T0 = serde::Serialize, R = serde::de::DeserializeOwned)]
     pub async fn create(
         &self,
         request: CreateVectorStoreRequest,
@@ -39,6 +41,7 @@ impl<'c, C: Config> VectorStores<'c, C> {
     }
 
     /// Retrieves a vector store.
+    #[crate::byot(T0 = std::fmt::Display, R = serde::de::DeserializeOwned)]
     pub async fn retrieve(&self, vector_store_id: &str) -> Result<VectorStoreObject, OpenAIError> {
         self.client
             .get(&format!("/vector_stores/{vector_store_id}"))
@@ -46,14 +49,16 @@ impl<'c, C: Config> VectorStores<'c, C> {
     }
 
     /// Returns a list of vector stores.
+    #[crate::byot(T0 = serde::Serialize, R = serde::de::DeserializeOwned)]
     pub async fn list<Q>(&self, query: &Q) -> Result<ListVectorStoresResponse, OpenAIError>
     where
         Q: Serialize + ?Sized,
     {
-        self.client.get_with_query("/vector_stores", query).await
+        self.client.get_with_query("/vector_stores", &query).await
     }
 
     /// Delete a vector store.
+    #[crate::byot(T0 = std::fmt::Display, R = serde::de::DeserializeOwned)]
     pub async fn delete(
         &self,
         vector_store_id: &str,
@@ -64,6 +69,7 @@ impl<'c, C: Config> VectorStores<'c, C> {
     }
 
     /// Modifies a vector store.
+    #[crate::byot(T0 = std::fmt::Display, T1 = serde::Serialize, R = serde::de::DeserializeOwned)]
     pub async fn update(
         &self,
         vector_store_id: &str,
@@ -71,6 +77,18 @@ impl<'c, C: Config> VectorStores<'c, C> {
     ) -> Result<VectorStoreObject, OpenAIError> {
         self.client
             .post(&format!("/vector_stores/{vector_store_id}"), request)
+            .await
+    }
+
+    /// Searches a vector store.
+    #[crate::byot(T0 = std::fmt::Display, T1 = serde::Serialize, R = serde::de::DeserializeOwned)]
+    pub async fn search(
+        &self,
+        vector_store_id: &str,
+        request: VectorStoreSearchRequest,
+    ) -> Result<VectorStoreSearchResultsPage, OpenAIError> {
+        self.client
+            .post(&format!("/vector_stores/{vector_store_id}/search"), request)
             .await
     }
 }

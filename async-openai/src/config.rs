@@ -1,6 +1,6 @@
 //! Client configurations: [OpenAIConfig] for OpenAI, [AzureConfig] for Azure OpenAI Service.
 use reqwest::header::{HeaderMap, AUTHORIZATION};
-use secrecy::{ExposeSecret, Secret};
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 /// Default v1 API base url
@@ -15,22 +15,48 @@ pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 
 /// [crate::Client] relies on this for every API call on OpenAI
 /// or Azure OpenAI service
-pub trait Config: Clone {
+pub trait Config: Send + Sync {
     fn headers(&self) -> HeaderMap;
     fn url(&self, path: &str) -> String;
     fn query(&self) -> Vec<(&str, &str)>;
 
     fn api_base(&self) -> &str;
 
-    fn api_key(&self) -> &Secret<String>;
+    fn api_key(&self) -> &SecretString;
 }
+
+/// Macro to implement Config trait for pointer types with dyn objects
+macro_rules! impl_config_for_ptr {
+    ($t:ty) => {
+        impl Config for $t {
+            fn headers(&self) -> HeaderMap {
+                self.as_ref().headers()
+            }
+            fn url(&self, path: &str) -> String {
+                self.as_ref().url(path)
+            }
+            fn query(&self) -> Vec<(&str, &str)> {
+                self.as_ref().query()
+            }
+            fn api_base(&self) -> &str {
+                self.as_ref().api_base()
+            }
+            fn api_key(&self) -> &SecretString {
+                self.as_ref().api_key()
+            }
+        }
+    };
+}
+
+impl_config_for_ptr!(Box<dyn Config>);
+impl_config_for_ptr!(std::sync::Arc<dyn Config>);
 
 /// Configuration for OpenAI API
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct OpenAIConfig {
     api_base: String,
-    api_key: Secret<String>,
+    api_key: SecretString,
     org_id: String,
     project_id: String,
 }
@@ -68,7 +94,7 @@ impl OpenAIConfig {
 
     /// To use a different API key different from default OPENAI_API_KEY env var
     pub fn with_api_key<S: Into<String>>(mut self, api_key: S) -> Self {
-        self.api_key = Secret::from(api_key.into());
+        self.api_key = SecretString::from(api_key.into());
         self
     }
 
@@ -123,7 +149,7 @@ impl Config for OpenAIConfig {
         &self.api_base
     }
 
-    fn api_key(&self) -> &Secret<String> {
+    fn api_key(&self) -> &SecretString {
         &self.api_key
     }
 
@@ -139,7 +165,7 @@ pub struct AzureConfig {
     api_version: String,
     deployment_id: String,
     api_base: String,
-    api_key: Secret<String>,
+    api_key: SecretString,
 }
 
 impl Default for AzureConfig {
@@ -172,7 +198,7 @@ impl AzureConfig {
 
     /// To use a different API key different from default OPENAI_API_KEY env var
     pub fn with_api_key<S: Into<String>>(mut self, api_key: S) -> Self {
-        self.api_key = Secret::from(api_key.into());
+        self.api_key = SecretString::from(api_key.into());
         self
     }
 
@@ -187,10 +213,7 @@ impl Config for AzureConfig {
     fn headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
 
-        headers.insert(
-            "api-key",
-            self.api_key.expose_secret().as_str().parse().unwrap(),
-        );
+        headers.insert("api-key", self.api_key.expose_secret().parse().unwrap());
 
         headers
     }
@@ -206,11 +229,63 @@ impl Config for AzureConfig {
         &self.api_base
     }
 
-    fn api_key(&self) -> &Secret<String> {
+    fn api_key(&self) -> &SecretString {
         &self.api_key
     }
 
     fn query(&self) -> Vec<(&str, &str)> {
         vec![("api-version", &self.api_version)]
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::types::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, CreateChatCompletionRequest,
+    };
+    use crate::Client;
+    use std::sync::Arc;
+    #[test]
+    fn test_client_creation() {
+        unsafe { std::env::set_var("OPENAI_API_KEY", "test") }
+        let openai_config = OpenAIConfig::default();
+        let config = Box::new(openai_config.clone()) as Box<dyn Config>;
+        let client = Client::with_config(config);
+        assert!(client.config().url("").ends_with("/v1"));
+
+        let config = Arc::new(openai_config) as Arc<dyn Config>;
+        let client = Client::with_config(config);
+        assert!(client.config().url("").ends_with("/v1"));
+        let cloned_client = client.clone();
+        assert!(cloned_client.config().url("").ends_with("/v1"));
+    }
+
+    async fn dynamic_dispatch_compiles(client: &Client<Box<dyn Config>>) {
+        let _ = client.chat().create(CreateChatCompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![ChatCompletionRequestMessage::User(
+                ChatCompletionRequestUserMessage {
+                    content: "Hello, world!".into(),
+                    ..Default::default()
+                },
+            )],
+            ..Default::default()
+        });
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_dispatch() {
+        let openai_config = OpenAIConfig::default();
+        let azure_config = AzureConfig::default();
+
+        let azure_client = Client::with_config(Box::new(azure_config.clone()) as Box<dyn Config>);
+        let oai_client = Client::with_config(Box::new(openai_config.clone()) as Box<dyn Config>);
+
+        let _ = dynamic_dispatch_compiles(&azure_client).await;
+        let _ = dynamic_dispatch_compiles(&oai_client).await;
+
+        let _ = tokio::spawn(async move { dynamic_dispatch_compiles(&azure_client).await });
+        let _ = tokio::spawn(async move { dynamic_dispatch_compiles(&oai_client).await });
     }
 }

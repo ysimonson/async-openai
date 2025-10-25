@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .create(CreateFileRequest {
             file: "./input/uber-10k.pdf".into(),
             purpose: FilePurpose::Assistants,
+            expires_after: None,
         })
         .await?;
 
@@ -83,7 +84,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .files()
         .create(CreateFileRequest {
             file: "./input/lyft-10k.pdf".into(),
-            ..Default::default()
+            purpose: FilePurpose::Assistants,
+            expires_after: None,
         })
         .await?;
 
